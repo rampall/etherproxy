@@ -4,7 +4,7 @@ import { Arrays, Objects } from 'cafe-utility'
 import { IncomingMessage, ServerResponse, createServer } from 'http'
 import fetch from 'node-fetch'
 import { metrics } from './metrics'
-import { Target, getHealthyTarget } from './target'
+import { Target, getHealthyTarget, markTargetAsUnhealthy } from './target'
 import { RequestContext, ResponseContext } from './types'
 import { fetchWithTimeout, respondWithFetchPromise } from './utility'
 
@@ -21,10 +21,11 @@ function main() {
     const port = Arrays.getNumberArgument(process.argv, 'port', process.env, PORT_ENV) || DEFAULT_PORT
     const target = Arrays.getArgument(process.argv, 'target', process.env, TARGET_ENV) || DEFAULT_TARGET
     const expiry = Arrays.getNumberArgument(process.argv, 'expiry', process.env, EXPIRY_ENV) || DEFAULT_EXPIRY
-    const fastIndex = Objects.createFastIndex()
+    const cache = new Map<string, { promise: Promise<ResponseContext | null>, expiry: number }>()
     const targets: Target[] = target.split(',').map(x => ({
         url: x,
-        lastErrorAt: 0
+        lastErrorAt: 0,
+        lastUsedAt: 0
     }))
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
         request.on('error', error => {
@@ -37,12 +38,12 @@ function main() {
             for (let i = 0; i < targets.length; i++) {
                 const target = getHealthyTarget(targets)
                 try {
-                    await fetch(target.url, { timeout: 10_000 })
+                    await fetch(target.url)
                     response.statusCode = 200
                     response.end(`200 OK - ${metrics.requests} requests served`)
                     return
                 } catch (error) {
-                    target.lastErrorAt = Date.now()
+                    markTargetAsUnhealthy(targets, target.url)
                     console.error(error)
                 }
             }
@@ -69,17 +70,15 @@ function main() {
                     delete parsedBody.id
                     metrics.requests++
                     const key = `${target.url}_${JSON.stringify(parsedBody)}`
-                    const cachedPromise = Objects.getFromFastIndexWithExpiracy(
-                        fastIndex,
-                        key
-                    ) as Promise<ResponseContext>
+                    const cached = cache.get(key)
+                    const cachedPromise = cached && cached.expiry > Date.now() ? cached.promise : null
                     if (cachedPromise) {
                         process.stdout.write(`Cache hit: ${key}\n`)
                         const successful = await respondWithFetchPromise(id, response, cachedPromise)
                         if (successful) {
                             return
                         } else {
-                            target.lastErrorAt = Date.now()
+                            markTargetAsUnhealthy(targets, target.url)
                             continue
                         }
                     }
@@ -92,16 +91,16 @@ function main() {
                         headers: context.headers,
                         body: context.body
                     })
-                    Objects.pushToFastIndexWithExpiracy(fastIndex as any, key, responsePromise, expiry)
+                    cache.set(key, { promise: responsePromise, expiry: Date.now() + expiry })
                     const successful = await respondWithFetchPromise(id, response, responsePromise)
                     if (successful) {
                         return
                     } else {
-                        target.lastErrorAt = Date.now()
+                        markTargetAsUnhealthy(targets, target.url)
                         continue
                     }
                 } catch (error) {
-                    target.lastErrorAt = Date.now()
+                    markTargetAsUnhealthy(targets, target.url)
                     console.error(error)
                 }
             }

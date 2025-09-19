@@ -25,15 +25,31 @@ export async function respondWithFetchPromise(
 }
 
 export async function fetchWithTimeout(url: string, options: RequestInit): Promise<ResponseContext | null> {
-    const response = fetch(url, { ...options, timeout: 10_000 })
-        .then(async x => ({
-            status: x.status,
-            headers: x.headers.raw(),
-            json: await x.json()
-        }))
-        .catch(error => {
-            console.error(error)
+    try {
+        const response = await fetch(url, { ...options, timeout: 10_000 })
+
+        // Check if response is ok (status 200-299)
+        if (!response.ok) {
+            console.error(`HTTP ${response.status} error from ${url}: ${response.statusText}`)
             return null
-        })
-    return response
+        }
+
+        // Try to parse JSON, but handle non-JSON responses gracefully
+        let jsonData
+        try {
+            jsonData = await response.json()
+        } catch (jsonError) {
+            console.error(`Invalid JSON response from ${url}: ${jsonError instanceof Error ? jsonError.message : String(jsonError)}`)
+            return null
+        }
+
+        return {
+            status: response.status,
+            headers: response.headers.raw(),
+            json: jsonData
+        }
+    } catch (error) {
+        console.error(`Fetch error from ${url}:`, error)
+        return null
+    }
 }
